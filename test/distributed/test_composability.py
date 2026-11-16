@@ -99,7 +99,6 @@ def loss_fn(y, target, scale=1e-4):
 class ComposabilityTest(MultiProcContinuousTest):
     @classmethod
     def backend_str(cls) -> str:
-        # Testing with NCCL backend
         return backend
 
     @property
@@ -532,7 +531,7 @@ class ComposabilityTest(MultiProcContinuousTest):
                 defer_reduce_grad_wait=True,
             )
 
-    @requires_nccl()
+    @requires_accelerator_dist_backend(["nccl", "xccl"])
     @skip_if_lt_x_gpu(4)
     @parametrize("dp_type", ["FSDP", "FSDP_MP"])
     def test_pp_fsdp_unshard_reshard_runtime(self, dp_type):

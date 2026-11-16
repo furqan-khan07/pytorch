@@ -11,7 +11,6 @@ import torch
 import torch.nn.functional as F
 import torch.nn.parallel as dp
 from torch import nn
-from torch.cuda.amp import autocast
 from torch.testing._internal.common_cuda import TEST_CUDA, TEST_MULTIGPU
 from torch.testing._internal.common_device_type import (
     dtypes,
@@ -19,7 +18,6 @@ from torch.testing._internal.common_device_type import (
     onlyCUDA,
     skipMeta,
 )
-from torch.testing._internal.common_distributed import requires_accelerator_dist_backend
 from torch.testing._internal.common_utils import (
     _assertGradAndGradgradChecks,
     dtype2prec_DONTUSE,
@@ -111,7 +109,7 @@ class TestDataParallel(TestCase):
             model_dp(torch.rand(10, 10).to(0))
 
     @skip_but_pass_in_sandcastle_if(
-        not TEST_MULTIACCELERATOR, "multi-GPU not supported"
+        not TEST_MULTIACCELERATOR, "multi-accelerator not supported"
     )
     def test_parallel_apply(self):
         l1 = nn.Linear(10, 5).to(0, torch.float)
@@ -131,14 +129,14 @@ class TestDataParallel(TestCase):
                 self.assertEqual(out, expected)
 
     @skip_but_pass_in_sandcastle_if(
-        not TEST_MULTIACCELERATOR, "multi-GPU not supported"
+        not TEST_MULTIACCELERATOR, "multi-accelerator not supported"
     )
     def test_parallel_apply_autocast(self):
         l1 = nn.Linear(10, 5).to(0, torch.float)
         l2 = nn.Linear(10, 5).to(1, torch.float)
         i1 = torch.randn(2, 10, device=f"{device_type}:0", dtype=torch.float)
         i2 = torch.randn(2, 10, device=f"{device_type}:1", dtype=torch.float)
-        with autocast():
+        with torch.autocast(device_type):
             expected1 = l1(i1)
             expected2 = l2(i2)
         modules = (l1, l2)
@@ -147,7 +145,7 @@ class TestDataParallel(TestCase):
         # each input can be either a collection of positional arguments
         #                       or an object representing the single argument
         for inputs in [((i1,), (i2,)), (i1, i2)]:
-            with autocast():
+            with torch.autocast(device_type):
                 outputs = dp.parallel_apply(modules, inputs, None)
             for out, expected in zip(outputs, expected_outputs):
                 self.assertEqual(out, expected)
@@ -373,7 +371,7 @@ class TestDataParallel(TestCase):
             expected_grads.append(param.grad.clone())
         dev_ids_list = [(0, 1), (1, 0)]
         for dev_id in dev_ids_list:
-            with torch.device(dev_id[0]):
+            with torch.accelerator.device_index(dev_id[0]):
                 l.to(device_type)
                 l.zero_grad()
                 out = dp.data_parallel(l, i, dev_id)
@@ -400,7 +398,7 @@ class TestDataParallel(TestCase):
             expected_grads.append(param.grad.clone())
         dev_ids_list = [(0, 1), (1, 0)]
         for dev_id in dev_ids_list:
-            with torch.device(dev_id[0]):
+            with torch.accelerator.device_index(dev_id[0]):
                 l.to(device_type)
                 l.zero_grad()
                 out = dp.data_parallel(l, i, dev_id)
@@ -718,10 +716,10 @@ class TestDataParallel(TestCase):
         if output_device != -1:
             self.assertEqual(result.get_device(), output_device)
         else:
-            self.assertFalse(result.is_cuda)
+            self.assertEqual(result.device.type, "cpu")
         grad = torch.randn((4, 4), dtype=torch.double)
         if output_device != -1:
-            grad = grad.cuda(output_device)
+            grad = grad.to(output_device)
         result.backward(grad)
         self.assertEqual(inputs[0].grad, grad[:2])
         self.assertEqual(inputs[1].grad, grad[2:])
@@ -745,7 +743,7 @@ class TestDataParallel(TestCase):
         if output_device != -1:
             self.assertEqual(result.get_device(), output_device)
         else:
-            self.assertFalse(result.device.type == device_type)
+            self.assertEqual(result.device.type, "cpu")
         grad = torch.randn(2, dtype=torch.double)
         if output_device != -1:
             grad = grad.to(output_device)
@@ -765,9 +763,8 @@ class TestDataParallel(TestCase):
         self._test_gather(0)
 
     @skip_but_pass_in_sandcastle_if(
-        not TEST_MULTIACCELERATOR, "multi-GPU not supported"
+        not TEST_MULTIACCELERATOR, "multi-accelerator not supported"
     )
-    @requires_accelerator_dist_backend(["nccl", "xccl"])
     def test_gather_different_len_dicts(self):
         inputs = (
             {"a": torch.randn(1, 2, requires_grad=True, device=f"{device_type}:0")},

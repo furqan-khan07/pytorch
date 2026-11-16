@@ -19,9 +19,10 @@ from torch.testing._internal.common_utils import (
 
 NO_NCCL = not hasattr(c10d, "ProcessGroupNCCL")
 
-# Fails on Python-3.9, see https://github.com/pytorch/pytorch/issues/51619
 device_type = acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
 backend = c10d.get_default_backend_for_device(device_type)
+
+# Fails on Python-3.9, see https://github.com/pytorch/pytorch/issues/51619
 
 # Skip dev-asan as torch + multiprocessing spawn have known issues
 if not TEST_WITH_DEV_DBG_ASAN:
@@ -78,7 +79,7 @@ if not TEST_WITH_DEV_DBG_ASAN:
         def test_all_to_all_single(self):
             self._test_all_to_all_single(backend)
 
-        # Test Ops only supported in NCCL.
+        # Test Ops only supported in NCCL and XCCL.
         @requires_accelerator_dist_backend(["nccl", "xccl"])
         @skip_if_lt_x_gpu(2)
         @skip_but_pass_in_sandcastle_if(

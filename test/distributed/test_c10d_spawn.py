@@ -22,10 +22,14 @@ except ImportError:
 # load_tests from common_utils is used to automatically filter tests for
 # sharding on sandcastle. This line silences flake warnings
 load_tests = load_tests  # noqa: PLW0127
-device_type = acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
+
 if not c10d.is_available():
     print("c10d not available, skipping tests", file=sys.stderr)
     sys.exit(0)
+
+device_type = (
+    acc.type if (acc := torch.accelerator.current_accelerator(True)) else "cpu"
+)
 
 
 class AbstractProcessGroupShareTensorTest:
