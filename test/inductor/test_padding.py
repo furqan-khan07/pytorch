@@ -9,11 +9,13 @@ from torch import nn, Tensor
 from torch._dynamo.convert_frame import maybe_cprofile
 from torch._dynamo.device_interface import get_interface_for_device
 from torch._dynamo.testing import rand_strided, reduce_to_scalar_loss
+from torch._dynamo.utils import same
 from torch._inductor import config, ir, metrics
 from torch._inductor.fx_passes import pad_mm as pad_mm_pass
 from torch._inductor.runtime.benchmarking import benchmarker
 from torch._inductor.test_case import run_tests, TestCase
 from torch._inductor.utils import ceildiv, run_and_get_code
+from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -977,6 +979,101 @@ class PaddingTest(TestCaseBase):
             compiled = torch.compile(program, backend="inductor")(x.clone())
 
         self.assertEqual(eager, compiled)
+
+
+class NestedCatPaddingTest(TestCase):
+    def _assert_valid_storage_bounds(self, value):
+        self.assertTrue(all(stride >= 0 for stride in value.stride()))
+        required_elements = (
+            value.storage_offset()
+            + 1
+            + sum(
+                (size - 1) * stride
+                for size, stride in zip(value.size(), value.stride())
+            )
+        )
+        self.assertLessEqual(
+            required_elements * value.element_size(), value.untyped_storage().nbytes()
+        )
+
+    @parametrize("dynamic", [False, True])
+    def test_nested_cat_returned_expand(self, device, dynamic):
+        def fn(x, scale):
+            values = torch.relu(x) * scale
+            values = values[:, :, 0, 0, :].transpose(1, 0).unsqueeze(0)
+            for _ in range(2):
+                values = torch.cat((values, values), dim=0)
+            first_copy = torch.relu(values[:1])
+            softmax = torch.softmax(first_copy.reshape(-1), dim=0)
+            view = first_copy.squeeze(0).expand(1, 48, 49, 27)
+            return softmax, view
+
+        torch.manual_seed(0)
+        x = torch.randn(49, 48, 1, 1, 1, device=device, dtype=torch.float32)
+        scale = torch.randn(1, 27, device=device, dtype=torch.float32)
+        eager = fn(x, scale)
+        metrics.reset()
+        with (
+            config.patch(
+                comprehensive_padding=True,
+                force_disable_caches=True,
+                **{"triton.cudagraphs": False},
+            ),
+            torch.no_grad(),
+        ):
+            actual = torch.compile(fn, fullgraph=True, dynamic=dynamic)(x, scale)
+        for value in actual:
+            self._assert_valid_storage_bounds(value)
+        self.assertEqual(eager, actual)
+        self.assertGreater(metrics.num_comprehensive_padding, 0)
+
+    @parametrize("dynamic", [False, True])
+    def test_nested_cat_chunk_values(self, device, dynamic):
+        def fn(x0, x4):
+            v1 = x0.transpose(0, 2)
+            v2 = v1[..., 0:1:60]
+            v3 = torch.softmax(v2, dim=0)
+            v5 = x4.max(dim=2).values
+            v6 = v5 + v3
+            v7 = v6.max(dim=3).values
+            v8 = v7.max(dim=0).values
+            v9 = torch.relu(v8)
+            v10 = torch.cat((v9, v9), dim=0)
+            v20 = torch.cat((v6, v6), dim=0)
+            v24 = torch.cat((v20, v20), dim=0)
+            v25_0, v25_1 = torch.chunk(v24, 2, dim=0)
+            _, v26_1 = torch.chunk(v25_0, 2, dim=0)
+            v34 = torch.cat((v10, v10), dim=0)
+            v35_0, v35_1 = torch.chunk(v34, 2, dim=0)
+            v36_0, v36_1 = torch.chunk(v35_0, 2, dim=0)
+            v37 = v26_1.max(dim=3).values
+            return v25_1, v26_1, v35_1, v36_1, v37 * v36_0
+
+        torch.manual_seed(0)
+        x = torch.randn(1, 34, 4, 60, device=device, dtype=torch.float32)
+        other = torch.randn(60, 1, 136, device=device, dtype=torch.float32)
+        expected = fn(x.cpu(), other.cpu())
+        reference = fn(x.cpu().double(), other.cpu().double())
+        metrics.reset()
+        with (
+            config.patch(
+                comprehensive_padding=True,
+                force_disable_caches=True,
+                **{"triton.cudagraphs": False},
+            ),
+            torch.no_grad(),
+        ):
+            actual = torch.compile(fn, fullgraph=True, dynamic=dynamic)(x, other)
+        for value in actual:
+            self._assert_valid_storage_bounds(value)
+        self.assertTrue(
+            same(expected, tuple(x.cpu() for x in actual), fp64_ref=reference)
+        )
+        if not dynamic:
+            self.assertGreater(metrics.num_comprehensive_padding, 0)
+
+
+instantiate_device_type_tests(NestedCatPaddingTest, globals(), only_for="cuda")
 
 
 if __name__ == "__main__":
